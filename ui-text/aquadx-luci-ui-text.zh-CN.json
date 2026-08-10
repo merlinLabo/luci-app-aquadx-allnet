@@ -1,0 +1,103 @@
+{
+  "_meta": {
+    "name": "AquaDX LuCI 前端文字",
+    "version": "1.0.0-1",
+    "encoding": "UTF-8",
+    "instructions": "请只修改各字段的值，不要修改键名。包含 {count}、{port}、{error}、{ip}、{path} 的占位符应予以保留。",
+    "scope": "AquaDX LuCI 页面自定义文字及会显示在该页面中的 AquaDX 服务返回信息；不包含 LuCI 系统自带的上传窗口通用翻译。"
+  },
+  "page": {
+    "title": "ALL.Net Server",
+    "subtitle": "基于 AquaDX 的本地 ALL.Net 游戏服务器",
+    "service_section_title": "服务状态",
+    "current_status_label": "当前状态",
+    "autostart_label": "开机自动启动",
+    "autostart_enabled_label": "",
+    "startup_progress_label": "启动进度",
+    "machine_section_title": "机台 IP",
+    "machine_section_description": "机台默认访问 ALL.Net 的 TCP 80，如 80 端口被占用，可指定机台 IP 进行端口转发",
+    "machine_ip_label": "IP",
+    "machine_remark_label": "备注",
+    "redirect_status_label": "转发状态",
+    "server_address_section_title": "服务器地址",
+    "custom_server_address_label": "自定义服务器地址",
+    "runtime_log_title": "运行日志"
+  },
+  "buttons": {
+    "machine_clear": "清空",
+    "machine_delete": "删除",
+    "machine_add": "新增机台",
+    "visit_webui": "打开 WebUI",
+    "database_export": "导出数据库文件",
+    "database_import": "导入数据库文件",
+    "service_start": "启动服务",
+    "service_stop": "关闭服务",
+    "apply_changes": "应用修改"
+  },
+  "status": {
+    "service_running": "运行中",
+    "service_starting": "正在启动",
+    "service_stopped": "已停止",
+    "progress_running": "ALL.Net Server 运行中",
+    "progress_stopped": "ALL.Net Server 已停止",
+    "progress_starting_fallback": "正在启动，请稍候…",
+    "redirect_active": "已启用",
+    "redirect_inactive": "未启用",
+    "loading_progress": "正在读取启动进度…",
+    "loading_log": "正在读取日志…",
+    "loading_status": "正在读取…",
+    "no_runtime_log": "AquaDX 未生成日志"
+  },
+  "validation_and_settings": {
+    "invalid_machine_ipv4": "请输入有效的机台 IPv4 地址",
+    "invalid_remark_character": "备注包含无效字符",
+    "duplicate_machine_ip": "机台 IP {ip} 重复",
+    "custom_server_address_required": "启用自定义服务器地址后必须输入地址",
+    "invalid_custom_server_address": "请输入有效的服务器 IPv4 地址或主机名",
+    "apply_failed": "应用修改失败",
+    "apply_success": "修改已应用"
+  },
+  "database": {
+    "generic_failure": "数据库操作失败",
+    "status_unavailable": "无法读取数据库操作状态",
+    "wait_timeout": "等待数据库操作完成超时",
+    "job_start_failed": "无法启动数据库操作",
+    "export_in_progress": "数据库导出中…",
+    "export_download_started": "数据库文件已导出",
+    "import_confirmation": "导入将覆盖当前 AquaDX 数据库，系统会先自动备份现有数据库。是否继续？",
+    "upload_information": "支持 AquaDX 导出的 .sql.gz 文件或 SQL 文件",
+    "upload_complete_importing": "文件上传完成，正在导入数据库…",
+    "import_complete": "数据库导入完成。导入前备份保存在 {path}"
+  },
+  "general_notifications": {
+    "command_failed": "命令执行失败",
+    "operation_submitted": "操作已提交",
+    "runtime_log_read_failed": "读取服务器运行日志失败 ({error})"
+  },
+  "service_messages_visible_in_ui": {
+    "already_running": "ALL.Net Server is already running.",
+    "already_starting": "ALL.Net Server is already starting. See the live log below.",
+    "startup_started": "ALL.Net Server startup started. See the live log below.",
+    "service_stopped": "ALL.Net Server has stopped.",
+    "invalid_client_argument_pairs": "Game client arguments must be IP/remark pairs.",
+    "invalid_client_argument_triples": "Game client arguments must be enabled/IP/remark triples.",
+    "invalid_ipv4": "Invalid IPv4 address ({ip})",
+    "invalid_remark_pipe": "Invalid remarks",
+    "invalid_autostart": "Invalid auto-start value ({value})",
+    "invalid_machine_enabled": "Invalid machine enabled value ({value})",
+    "invalid_custom_server_address_enabled": "Invalid custom server address enabled value ({value})",
+    "custom_server_address_required": "Custom server address is required when enabled.",
+    "invalid_custom_server_address": "Invalid custom server address ({address})",
+    "database_job_already_running": "Another database task is already running.",
+    "database_upload_missing": "The uploaded database file is missing or empty.",
+    "database_job_cannot_start": "Unable to start the database task.",
+    "database_cannot_start": "MariaDB could not be started.",
+    "database_export_failed": "Database export failed.",
+    "database_export_compress_failed": "Unable to compress the database export.",
+    "database_import_archive_damaged": "The compressed database file is damaged.",
+    "database_import_read_failed": "Unable to read the uploaded database file.",
+    "database_import_invalid_file": "Invaild backup file.",
+    "database_preimport_backup_failed": "Unable to create database backup.",
+    "database_import_failed_restored": "Database import failed. Backup was restored."
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "_meta": {
+    "name": "AquaDX LuCI 启动进度文字",
+    "version": "1.0.0-1",
+    "encoding": "UTF-8",
+    "instructions": "请只修改字段值，不要修改键名或 JSON 结构。请保留花括号中的变量占位符，变量位置可以调整。",
+    "source": "LuCI 前端状态文字与 /usr/libexec/aquadx-service 写入 launcher.log 的全部 AquaDX 进度消息"
+  },
+  "frontend_state": {
+    "running": "ALL.Net Server 运行中",
+    "stopped": "ALL.Net Server 已停止",
+    "starting_fallback": "正在启动，请稍候…"
+  },
+  "startup_progress": {
+    "nft_command_missing": "系统缺少 nft 命令，无法配置机台端口转发",
+    "machine_redirect_configured": "已为 {active_machine_count} 台机台配置端口转发 ({frontend_port})",
+    "startup_cancelled": "启动已被取消",
+    "installing_offline_mariadb": "安装 MariaDB 及 Java Runtime",
+    "configuring_database": "配置数据库与本地账户",
+    "another_startup_running": "另一个启动任务正在运行",
+    "startup_begin": "Starting ALL.Net Server",
+    "offline_mariadb_install_failed": "离线安装 MariaDB 失败，请查看 opkg 日志",
+    "java_runtime_missing": "Java Runtime 不存在或没有执行权限 ({java_path})",
+    "incompatible_system": "当前环境不是兼容的 OpenWrt x86_64 musl 环境",
+    "starting_mariadb": "启动 MariaDB",
+    "mariadb_ready_timeout": "等待 MariaDB 就绪超时，请执行 logread -e mysqld 查看系统日志",
+    "database_initialization_failed": "初始化数据库失败",
+    "java_process_already_running": "Java 进程已经运行",
+    "starting_java": "启动 Java  (-Xms{java_xms} -Xmx{java_xmx})",
+    "data_directory_unavailable": "无法进入数据目录 {data_dir}",
+    "java_process_create_failed": "无法创建 Java 进程",
+    "machine_redirect_failed": "机台端口转发配置失败",
+    "server_ready": "ALL.Net Server 已启动 (http://{lan_ip}:{frontend_port}/)",
+    "java_process_exited": "Java 进程意外退出",
+    "aquadx_ready_timeout": "等待应用超时",
+    "server_stopped": "ALL.Net Server 已停止"
+  }
+}

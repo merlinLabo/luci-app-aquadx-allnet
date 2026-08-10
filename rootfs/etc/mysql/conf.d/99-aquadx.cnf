@@ -1,0 +1,17 @@
+[client]
+port=3369
+socket=/var/run/mysqld/mysqld.sock
+
+[mysqld]
+port=3369
+bind-address=127.0.0.1
+datadir=/opt/aquadx/data/mariadb
+socket=/var/run/mysqld/mysqld.sock
+pid-file=/var/run/mysqld/mysqld.pid
+skip-name-resolve
+character-set-server=utf8mb4
+collation-server=utf8mb4_unicode_ci
+max_connections=80
+innodb_buffer_pool_size=128M
+innodb_log_buffer_size=16M
+innodb_flush_log_at_trx_commit=2

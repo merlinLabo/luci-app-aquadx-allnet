@@ -1,0 +1,832 @@
+#!/bin/sh
+
+. /lib/functions.sh
+
+APP_PID_FILE="/var/run/aquadx.pid"
+START_PID_FILE="/var/run/aquadx-start.pid"
+LOCK_DIR="/var/lock/aquadx-start.lock"
+STOP_FILE="/var/run/aquadx-stop-requested"
+JAVA_BIN="/usr/lib/aquadx/jre/bin/java"
+LOG_FILE="/opt/aquadx/logs/launcher.log"
+DB_PASSWORD="AquaDX_Local_DB_2026!"
+DB_JOB_PID_FILE="/var/run/aquadx-db-job.pid"
+DB_JOB_STATUS_FILE="/var/run/aquadx-db-job.status"
+DB_UPLOAD_FILE="/tmp/aquadx-database-import.upload"
+
+load_config() {
+	config_load aquadx
+	config_get DATA_DIR main data_dir "/opt/aquadx"
+	config_get JAVA_XMS main java_xms "256m"
+	config_get JAVA_XMX main java_xmx "1536m"
+	config_get FRONTEND_PORT main frontend_port "8088"
+	config_get GAME_CLIENT_IP main game_client_ip ""
+	config_get CUSTOM_SERVER_ADDRESS_ENABLED main custom_server_address_enabled "0"
+	config_get CUSTOM_SERVER_ADDRESS main custom_server_address ""
+	LOG_FILE="$DATA_DIR/logs/launcher.log"
+}
+
+log() {
+	mkdir -p "$(dirname "$LOG_FILE")"
+	echo "$(date '+%Y-%m-%d %H:%M:%S') [AquaDX] $*" >> "$LOG_FILE"
+}
+
+pid_alive() {
+	pid_file="$1"
+	[ -s "$pid_file" ] || return 1
+	pid="$(cat "$pid_file" 2>/dev/null)"
+	[ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
+valid_ipv4() {
+	ip_value="$1"
+	old_ifs="$IFS"
+	IFS=.
+	set -- $ip_value
+	IFS="$old_ifs"
+	[ "$#" -eq 4 ] || return 1
+	for octet in "$@"; do
+		case "$octet" in
+			''|*[!0-9]*) return 1 ;;
+		esac
+		[ "$octet" -le 255 ] 2>/dev/null || return 1
+	done
+}
+
+valid_server_address() {
+	server_address="$1"
+	[ -n "$server_address" ] || return 1
+	[ "${#server_address}" -le 253 ] || return 1
+	case "$server_address" in
+		*[!A-Za-z0-9.-]*|.*|*.|*..*) return 1 ;;
+	esac
+	case "$server_address" in
+		*[A-Za-z-]*) ;;
+		*) valid_ipv4 "$server_address" || return 1 ;;
+	esac
+	old_ifs="$IFS"
+	IFS=.
+	set -- $server_address
+	IFS="$old_ifs"
+	for label in "$@"; do
+		[ -n "$label" ] && [ "${#label}" -le 63 ] || return 1
+		case "$label" in
+			-*|*-) return 1 ;;
+		esac
+	done
+}
+
+clear_game_redirect() {
+	command -v nft >/dev/null 2>&1 || return 0
+	nft delete table inet aquadx >/dev/null 2>&1 || true
+}
+
+parse_game_client() {
+	client_entry="$1"
+	case "$client_entry" in
+		0\|*|1\|*)
+			client_enabled="${client_entry%%|*}"
+			client_rest="${client_entry#*|}"
+			client_ip="${client_rest%%|*}"
+			case "$client_rest" in
+				*'|'*) client_remark="${client_rest#*|}" ;;
+				*) client_remark="" ;;
+			esac
+			;;
+		*)
+			client_enabled=1
+			client_ip="${client_entry%%|*}"
+			case "$client_entry" in
+				*'|'*) client_remark="${client_entry#*|}" ;;
+				*) client_remark="" ;;
+			esac
+			;;
+	esac
+}
+
+count_game_client() {
+	parse_game_client "$1"
+	GAME_CLIENT_ENTRY_COUNT=$((GAME_CLIENT_ENTRY_COUNT + 1))
+	if [ "$client_enabled" = "1" ] && valid_ipv4 "$client_ip"; then
+		GAME_CLIENT_COUNT=$((GAME_CLIENT_COUNT + 1))
+		[ -n "$FIRST_GAME_CLIENT_IP" ] || FIRST_GAME_CLIENT_IP="$client_ip"
+	fi
+}
+
+add_game_client_redirect() {
+	parse_game_client "$1"
+	[ "$client_enabled" = "1" ] || return 0
+	valid_ipv4 "$client_ip" || return 0
+	nft add rule inet aquadx prerouting ip saddr "$client_ip" tcp dport 80 \
+		redirect to "$FRONTEND_PORT" >/dev/null 2>&1 || GAME_REDIRECT_FAILED=1
+}
+
+configure_game_redirect() {
+	clear_game_redirect
+	GAME_CLIENT_COUNT=0
+	GAME_CLIENT_ENTRY_COUNT=0
+	FIRST_GAME_CLIENT_IP=""
+	config_list_foreach main game_client count_game_client
+	if [ "$GAME_CLIENT_ENTRY_COUNT" -eq 0 ] && valid_ipv4 "$GAME_CLIENT_IP"; then
+		GAME_CLIENT_COUNT=1
+		FIRST_GAME_CLIENT_IP="$GAME_CLIENT_IP"
+	fi
+	[ "$GAME_CLIENT_COUNT" -gt 0 ] || return 0
+	if ! command -v nft >/dev/null 2>&1; then
+		log "系统缺少 nft 命令，无法配置机台端口转发"
+		return 1
+	fi
+	nft add table inet aquadx >/dev/null 2>&1 || return 1
+	nft 'add chain inet aquadx prerouting { type nat hook prerouting priority -100; policy accept; }' \
+		>/dev/null 2>&1 || {
+		clear_game_redirect
+		return 1
+	}
+	GAME_REDIRECT_FAILED=0
+	config_list_foreach main game_client add_game_client_redirect
+	if [ "$GAME_CLIENT_ENTRY_COUNT" -eq 0 ] && [ -n "$GAME_CLIENT_IP" ]; then
+		add_game_client_redirect "$GAME_CLIENT_IP|"
+	fi
+	if [ "$GAME_REDIRECT_FAILED" -ne 0 ]; then
+		clear_game_redirect
+		return 1
+	fi
+	log "已为 $GAME_CLIENT_COUNT 台机台配置端口转发 ($FRONTEND_PORT)"
+}
+
+cancel_if_requested() {
+	if [ -f "$STOP_FILE" ]; then
+		log "启动已被取消"
+		exit 0
+	fi
+}
+
+prepare_directories() {
+	mkdir -p "$DATA_DIR/data/mariadb" "$DATA_DIR/data/upload/mai2/plays" \
+		"$DATA_DIR/data/upload/mai2/portrait" "$DATA_DIR/data/upload/net/portrait" \
+		"$DATA_DIR/logs" /var/run/mysqld
+	if grep -q '^mariadb:' /etc/passwd 2>/dev/null; then
+		chown -R mariadb:mariadb "$DATA_DIR/data/mariadb" /var/run/mysqld
+	fi
+	# Temurin's Alpine build requests Alpine's libc soname. OpenWrt exposes the
+	# same musl runtime through its loader, so provide the expected local name.
+	ln -sf /lib/ld-musl-x86_64.so.1 /usr/lib/aquadx/jre/lib/libc.musl-x86_64.so.1
+	if [ ! -f "$DATA_DIR/data/GeoLite2-Country.mmdb" ]; then
+		cp /usr/share/aquadx/GeoLite2-Country.mmdb "$DATA_DIR/data/GeoLite2-Country.mmdb"
+	fi
+}
+
+ensure_database_packages() {
+	if command -v mysqld >/dev/null 2>&1 && command -v mysql >/dev/null 2>&1 && \
+		command -v mysqldump >/dev/null 2>&1; then
+		return 0
+	fi
+	log "安装 MariaDB 及 Java Runtime"
+	opkg install /usr/share/aquadx/deps/*.ipk >> "$LOG_FILE" 2>&1 || return 1
+	command -v mysqld >/dev/null 2>&1 && command -v mysql >/dev/null 2>&1
+}
+
+wait_for_database() {
+	i=0
+	while [ "$i" -lt 120 ]; do
+		cancel_if_requested
+		if mysqladmin --protocol=socket --socket=/var/run/mysqld/mysqld.sock \
+			-uroot ping --silent >/dev/null 2>&1; then
+			return 0
+		fi
+		i=$((i + 1))
+		sleep 1
+	done
+	return 1
+}
+
+configure_database() {
+	log "配置数据库与本地账户"
+	mysql --protocol=socket --socket=/var/run/mysqld/mysqld.sock -uroot >> "$LOG_FILE" 2>&1 <<-SQL
+		CREATE DATABASE IF NOT EXISTS main CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+		CREATE USER IF NOT EXISTS 'aqua'@'127.0.0.1' IDENTIFIED BY '$DB_PASSWORD';
+		CREATE USER IF NOT EXISTS 'aqua'@'localhost' IDENTIFIED BY '$DB_PASSWORD';
+		ALTER USER 'aqua'@'127.0.0.1' IDENTIFIED BY '$DB_PASSWORD';
+		ALTER USER 'aqua'@'localhost' IDENTIFIED BY '$DB_PASSWORD';
+		GRANT ALL PRIVILEGES ON main.* TO 'aqua'@'127.0.0.1';
+		GRANT ALL PRIVILEGES ON main.* TO 'aqua'@'localhost';
+		FLUSH PRIVILEGES;
+	SQL
+}
+
+start_stack() {
+	load_config
+	if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+		log "另一个启动任务正在运行"
+		exit 0
+	fi
+	trap 'rm -rf "$LOCK_DIR"; rm -f "$START_PID_FILE"' EXIT INT TERM
+
+	log "Starting ALL.Net Server"
+	prepare_directories
+	ensure_database_packages || {
+		log "离线安装 MariaDB 失败，请查看 opkg 日志"
+		exit 1
+	}
+	prepare_directories
+	[ -x "$JAVA_BIN" ] || {
+		log "Java Runtime 不存在或没有执行权限 ($JAVA_BIN)"
+		exit 1
+	}
+	[ -e /lib/ld-musl-x86_64.so.1 ] || {
+		log "当前环境不是兼容的 OpenWrt x86_64 musl 环境"
+		exit 1
+	}
+	uci -q set mysqld.general.enabled='1'
+	uci -q commit mysqld
+	log "启动 MariaDB"
+	/etc/init.d/mysqld start >> "$LOG_FILE" 2>&1
+	if ! wait_for_database; then
+		log "等待 MariaDB 就绪超时，请执行 logread -e mysqld 查看系统日志"
+		exit 1
+	fi
+	configure_database || {
+		log "初始化数据库失败"
+		exit 1
+	}
+	cancel_if_requested
+
+	if pid_alive "$APP_PID_FILE"; then
+		log "Java 进程已经运行"
+	else
+		rm -f "$APP_PID_FILE"
+		log "启动 Java  (-Xms$JAVA_XMS -Xmx$JAVA_XMX)"
+		cd "$DATA_DIR" || {
+			log "无法进入数据目录 $DATA_DIR"
+			exit 1
+		}
+		effective_server_address=""
+		if [ "$CUSTOM_SERVER_ADDRESS_ENABLED" = "1" ]; then
+			if ! valid_server_address "$CUSTOM_SERVER_ADDRESS"; then
+				log "自定义服务器地址无效"
+				exit 1
+			fi
+			effective_server_address="$CUSTOM_SERVER_ADDRESS"
+			log "使用自定义服务器地址 $effective_server_address"
+		fi
+		start-stop-daemon -S -b -m -p "$APP_PID_FILE" -x "$JAVA_BIN" -- \
+			"-Xms$JAVA_XMS" "-Xmx$JAVA_XMX" -Djava.awt.headless=true \
+			-jar /usr/lib/aquadx/AquaDX.jar \
+			--spring.config.additional-location=file:/etc/aquadx/ \
+			--spring.web.resources.static-locations="file:/usr/share/aquadx/web/,classpath:/META-INF/resources/,classpath:/resources/,classpath:/static/,classpath:/public/" \
+			--paths.mai2-plays="$DATA_DIR/data/upload/mai2/plays" \
+			--paths.mai2-portrait="$DATA_DIR/data/upload/mai2/portrait" \
+			--paths.aqua-net-portrait="$DATA_DIR/data/upload/net/portrait" \
+			--aqua-net.geoip.path="$DATA_DIR/data/GeoLite2-Country.mmdb" \
+			--server.port="$FRONTEND_PORT" --allnet.server.port="$FRONTEND_PORT" \
+			--allnet.server.host="$effective_server_address" \
+			</dev/null >> "$LOG_FILE" 2>&1 || {
+				log "无法创建 Java 进程"
+				exit 1
+			}
+	fi
+	configure_game_redirect || log "机台端口转发配置失败"
+
+	i=0
+	while [ "$i" -lt 240 ]; do
+		cancel_if_requested
+		if wget -q -T 2 -O - "http://127.0.0.1:$FRONTEND_PORT/sys/test" 2>/dev/null | grep -q "Server running"; then
+			log "ALL.Net Server 已启动 (http://$(uci -q get network.lan.ipaddr):$FRONTEND_PORT/)"
+			exit 0
+		fi
+		if ! pid_alive "$APP_PID_FILE"; then
+			log "Java 进程意外退出"
+			exit 1
+		fi
+		i=$((i + 1))
+		sleep 1
+	done
+	log "等待应用超时"
+	exit 1
+}
+
+start_async() {
+	load_config
+	if pid_alive "$APP_PID_FILE" && \
+		wget -q -T 2 -O - "http://127.0.0.1:$FRONTEND_PORT/sys/test" 2>/dev/null | grep -q "Server running"; then
+		echo "ALL.Net Server is already running."
+		return 0
+	fi
+	if pid_alive "$START_PID_FILE"; then
+		echo "ALL.Net Server is already starting. See the live log below."
+		return 0
+	fi
+	rm -f "$STOP_FILE" "$START_PID_FILE"
+	prepare_directories
+	start-stop-daemon -S -b -m -p "$START_PID_FILE" -x "$0" -- _start \
+		</dev/null >> "$LOG_FILE" 2>&1
+	echo "ALL.Net Server startup started. See the live log below."
+}
+
+stop_pid() {
+	pid_file="$1"
+	if pid_alive "$pid_file"; then
+		pid="$(cat "$pid_file")"
+		kill "$pid" >/dev/null 2>&1
+		i=0
+		while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 20 ]; do
+			i=$((i + 1))
+			sleep 1
+		done
+		kill -9 "$pid" >/dev/null 2>&1
+	fi
+	rm -f "$pid_file"
+}
+
+stop_stack() {
+	load_config
+	touch "$STOP_FILE"
+	clear_game_redirect
+	stop_pid "$START_PID_FILE"
+	stop_pid "$APP_PID_FILE"
+	/etc/init.d/mysqld stop >/dev/null 2>&1
+	rm -rf "$LOCK_DIR"
+	log "ALL.Net Server 已停止"
+	echo "ALL.Net Server has stopped."
+}
+
+enabled_state() {
+	for link in /etc/rc.d/S*aquadx; do
+		[ -L "$link" ] && return 0
+	done
+	return 1
+}
+
+status_json() {
+	load_config
+	running=false
+	starting=false
+	enabled=false
+	redirect_active=false
+	if pid_alive "$APP_PID_FILE" && \
+		wget -q -T 1 -O - "http://127.0.0.1:$FRONTEND_PORT/sys/test" 2>/dev/null | grep -q "Server running"; then
+		running=true
+	fi
+	pid_alive "$START_PID_FILE" && starting=true
+	enabled_state && enabled=true
+	command -v nft >/dev/null 2>&1 && nft list table inet aquadx >/dev/null 2>&1 && redirect_active=true
+	FIRST_GAME_CLIENT_IP=""
+	GAME_CLIENT_COUNT=0
+	GAME_CLIENT_ENTRY_COUNT=0
+	config_list_foreach main game_client count_game_client
+	if [ -z "$FIRST_GAME_CLIENT_IP" ] && valid_ipv4 "$GAME_CLIENT_IP"; then
+		FIRST_GAME_CLIENT_IP="$GAME_CLIENT_IP"
+	fi
+	printf '{"running":%s,"starting":%s,"enabled":%s,"port":%s,"gameClientIp":"%s","redirectActive":%s}\n' \
+		"$running" "$starting" "$enabled" "$FRONTEND_PORT" "$FIRST_GAME_CLIENT_IP" "$redirect_active"
+}
+
+print_game_client() {
+	parse_game_client "$1"
+	if [ "$client_enabled" = "1" ]; then
+		valid_ipv4 "$client_ip" || return 0
+	elif [ -n "$client_ip" ]; then
+		valid_ipv4 "$client_ip" || return 0
+	fi
+	printf '%s\t%s\t%s\n' "$client_enabled" "$client_ip" "$client_remark"
+	LISTED_GAME_CLIENTS=$((LISTED_GAME_CLIENTS + 1))
+}
+
+list_game_clients() {
+	load_config
+	LISTED_GAME_CLIENTS=0
+	config_list_foreach main game_client print_game_client
+	if [ "$LISTED_GAME_CLIENTS" -eq 0 ] && valid_ipv4 "$GAME_CLIENT_IP"; then
+		printf '1\t%s\t\n' "$GAME_CLIENT_IP"
+	fi
+}
+
+server_address_status() {
+	load_config
+	printf '%s\t%s\n' "$CUSTOM_SERVER_ADDRESS_ENABLED" "$CUSTOM_SERVER_ADDRESS"
+}
+
+validate_game_clients() {
+	[ $(( $# % 2 )) -eq 0 ] || {
+		echo "Game client arguments must be IP/remark pairs." >&2
+		return 1
+	}
+	while [ "$#" -ge 2 ]; do
+		client_ip="$1"
+		client_remark="$2"
+		shift 2
+		[ -n "$client_ip$client_remark" ] || continue
+		if ! valid_ipv4 "$client_ip"; then
+			echo "Invalid IPv4 address ($client_ip)" >&2
+			return 1
+		fi
+		case "$client_remark" in
+			*'|'*)
+				echo "Invalid remarks" >&2
+				return 1
+				;;
+		esac
+	done
+}
+
+save_game_clients() {
+	uci -q delete aquadx.main.game_client
+	uci -q delete aquadx.main.game_client_ip
+	while [ "$#" -ge 2 ]; do
+		client_ip="$1"
+		client_remark="$2"
+		shift 2
+		[ -n "$client_ip$client_remark" ] || continue
+		uci -q add_list aquadx.main.game_client="1|$client_ip|$client_remark"
+	done
+	uci -q commit aquadx
+	load_config
+	if pid_alive "$APP_PID_FILE"; then
+		configure_game_redirect || return 1
+	else
+		clear_game_redirect
+	fi
+}
+
+validate_game_clients_v2() {
+	[ $(( $# % 3 )) -eq 0 ] || {
+		echo "Game client arguments must be enabled/IP/remark triples." >&2
+		return 1
+	}
+	while [ "$#" -ge 3 ]; do
+		client_enabled="$1"
+		client_ip="$2"
+		client_remark="$3"
+		shift 3
+		case "$client_enabled" in
+			0|1) ;;
+			*)
+				echo "Invalid machine enabled value ($client_enabled)" >&2
+				return 1
+				;;
+		esac
+		if [ "$client_enabled" = "1" ] || [ -n "$client_ip" ]; then
+			if ! valid_ipv4 "$client_ip"; then
+			echo "Invalid IPv4 address ($client_ip)" >&2
+				return 1
+			fi
+		fi
+		case "$client_remark" in
+			*'|'*)
+				echo "Invalid remarks" >&2
+				return 1
+				;;
+		esac
+	done
+}
+
+save_game_clients_v2() {
+	uci -q delete aquadx.main.game_client
+	uci -q delete aquadx.main.game_client_ip
+	while [ "$#" -ge 3 ]; do
+		client_enabled="$1"
+		client_ip="$2"
+		client_remark="$3"
+		shift 3
+		[ -n "$client_ip$client_remark" ] || continue
+		uci -q add_list aquadx.main.game_client="$client_enabled|$client_ip|$client_remark"
+	done
+	uci -q commit aquadx
+	load_config
+	if pid_alive "$APP_PID_FILE"; then
+		configure_game_redirect || return 1
+	else
+		clear_game_redirect
+	fi
+}
+
+set_game_ip() {
+	new_ip="$1"
+	if [ -n "$new_ip" ]; then
+		validate_game_clients "$new_ip" "" || return 1
+		save_game_clients "$new_ip" "" || return 1
+	else
+		save_game_clients || return 1
+	fi
+	if [ -n "$new_ip" ]; then
+		echo "Game client IP saved: $new_ip"
+	else
+		echo "Game client IP and port redirect cleared."
+	fi
+}
+
+apply_settings() {
+	auto_start="$1"
+	shift
+	case "$auto_start" in
+		0|1) ;;
+		*)
+			echo "Invalid auto-start value ($auto_start)" >&2
+			return 1
+			;;
+	esac
+	validate_game_clients "$@" || return 1
+	if [ "$auto_start" = "1" ]; then
+		/etc/init.d/aquadx enable
+	else
+		/etc/init.d/aquadx disable
+	fi
+	save_game_clients "$@" || return 1
+	echo "AquaDX settings applied."
+}
+
+apply_settings_v2() {
+	auto_start="$1"
+	shift
+	case "$auto_start" in
+		0|1) ;;
+		*)
+			echo "Invalid auto-start value ($auto_start)" >&2
+			return 1
+			;;
+	esac
+	validate_game_clients_v2 "$@" || return 1
+	if [ "$auto_start" = "1" ]; then
+		/etc/init.d/aquadx enable
+	else
+		/etc/init.d/aquadx disable
+	fi
+	save_game_clients_v2 "$@" || return 1
+	echo "AquaDX settings applied."
+}
+
+validate_server_address_settings() {
+	custom_enabled="$1"
+	custom_address="$2"
+	case "$custom_enabled" in
+		0|1) ;;
+		*)
+			echo "Invalid custom server address enabled value ($custom_enabled)" >&2
+			return 1
+			;;
+	esac
+	if [ "$custom_enabled" = "1" ] && [ -z "$custom_address" ]; then
+		echo "Custom server address is required when enabled." >&2
+		return 1
+	fi
+	if [ -n "$custom_address" ] && ! valid_server_address "$custom_address"; then
+		echo "Invalid custom server address ($custom_address)" >&2
+		return 1
+	fi
+}
+
+restart_app_for_settings() {
+	sleep 1
+	load_config
+	touch "$STOP_FILE"
+	stop_pid "$START_PID_FILE"
+	stop_pid "$APP_PID_FILE"
+	rm -rf "$LOCK_DIR"
+	rm -f "$STOP_FILE"
+	start_async
+}
+
+schedule_settings_restart() {
+	start-stop-daemon -S -b -x "$0" -- _restart-settings \
+		</dev/null >> "$LOG_FILE" 2>&1
+}
+
+apply_settings_v3() {
+	[ "$#" -ge 3 ] || {
+		echo "Missing custom server address settings." >&2
+		return 1
+	}
+	auto_start="$1"
+	custom_enabled="$2"
+	custom_address="$3"
+	shift 3
+	case "$auto_start" in
+		0|1) ;;
+		*)
+			echo "Invalid auto-start value ($auto_start)" >&2
+			return 1
+			;;
+	esac
+	validate_server_address_settings "$custom_enabled" "$custom_address" || return 1
+	validate_game_clients_v2 "$@" || return 1
+	old_effective_address=""
+	if [ "$CUSTOM_SERVER_ADDRESS_ENABLED" = "1" ]; then
+		old_effective_address="$CUSTOM_SERVER_ADDRESS"
+	fi
+	new_effective_address=""
+	if [ "$custom_enabled" = "1" ]; then
+		new_effective_address="$custom_address"
+	fi
+	service_active=0
+	if pid_alive "$APP_PID_FILE" || pid_alive "$START_PID_FILE"; then
+		service_active=1
+	fi
+	uci -q set aquadx.main.custom_server_address_enabled="$custom_enabled"
+	uci -q set aquadx.main.custom_server_address="$custom_address"
+	if [ "$auto_start" = "1" ]; then
+		/etc/init.d/aquadx enable
+	else
+		/etc/init.d/aquadx disable
+	fi
+	save_game_clients_v2 "$@" || return 1
+	if [ "$service_active" = "1" ] && [ "$old_effective_address" != "$new_effective_address" ]; then
+		log "服务器地址设置已更改，正在重新启动 AquaDX"
+		schedule_settings_restart || return 1
+	fi
+	echo "AquaDX settings applied."
+}
+
+database_ready() {
+	mysqladmin --protocol=socket --socket=/var/run/mysqld/mysqld.sock \
+		-uroot ping --silent >/dev/null 2>&1
+}
+
+ensure_database_for_transfer() {
+	ensure_database_packages || return 1
+	uci -q set mysqld.general.enabled='1'
+	uci -q commit mysqld
+	/etc/init.d/mysqld start >/dev/null 2>&1
+	wait_for_database
+}
+
+write_db_job_status() {
+	printf '%s\t%s\n' "$1" "$2" > "$DB_JOB_STATUS_FILE"
+}
+
+db_job_status() {
+	if pid_alive "$DB_JOB_PID_FILE"; then
+		echo "running"
+	elif [ -s "$DB_JOB_STATUS_FILE" ]; then
+		cat "$DB_JOB_STATUS_FILE"
+	else
+		echo "idle"
+	fi
+}
+
+start_db_job() {
+	job_name="$1"
+	if pid_alive "$DB_JOB_PID_FILE"; then
+		echo "Another database task is already running." >&2
+		return 1
+	fi
+	if [ "$job_name" = "import-db" ] && [ ! -s "$DB_UPLOAD_FILE" ]; then
+		echo "The uploaded database file is missing or empty." >&2
+		return 1
+	fi
+	rm -f "$DB_JOB_PID_FILE"
+	write_db_job_status running "$job_name"
+	start-stop-daemon -S -b -m -p "$DB_JOB_PID_FILE" -x "$0" -- "_$job_name" \
+		</dev/null >/dev/null 2>&1 || {
+		write_db_job_status error "Unable to start the database task."
+		return 1
+	}
+	echo "Database task started."
+}
+
+finish_db_job() {
+	write_db_job_status "$1" "$2"
+	rm -f "$DB_JOB_PID_FILE"
+}
+
+export_database_worker() {
+	trap 'rm -f "$DB_JOB_PID_FILE" "$export_raw"' EXIT INT TERM
+	db_was_running=false
+	database_ready && db_was_running=true
+	if ! ensure_database_for_transfer; then
+		finish_db_job error "MariaDB could not be started."
+		return 1
+	fi
+	mkdir -p /www/aquadx-download
+	token="$(cat /proc/sys/kernel/random/uuid 2>/dev/null | tr -d '-')"
+	[ -n "$token" ] || token="$(date +%s)-$$"
+	export_name="AquaDX-$(date '+%Y%m%d-%H%M%S')-$token.sql.gz"
+	export_file="/www/aquadx-download/$export_name"
+	export_raw="/tmp/aquadx-export-$$.sql"
+	if ! mysqldump --protocol=socket --socket=/var/run/mysqld/mysqld.sock -uroot \
+		--single-transaction --routines --events --triggers --add-drop-database \
+		--databases main > "$export_raw" 2>> "$LOG_FILE"; then
+		finish_db_job error "Database export failed."
+		[ "$db_was_running" = true ] || /etc/init.d/mysqld stop >/dev/null 2>&1
+		return 1
+	fi
+	if ! gzip -c "$export_raw" > "$export_file"; then
+		rm -f "$export_file"
+		finish_db_job error "Unable to compress the database export."
+		[ "$db_was_running" = true ] || /etc/init.d/mysqld stop >/dev/null 2>&1
+		return 1
+	fi
+	chmod 0644 "$export_file"
+	[ "$db_was_running" = true ] || /etc/init.d/mysqld stop >/dev/null 2>&1
+	finish_db_job done "/aquadx-download/$export_name"
+	start-stop-daemon -S -b -x "$0" -- _cleanup-export "$export_file" \
+		</dev/null >/dev/null 2>&1
+}
+
+cleanup_export() {
+	export_file="$1"
+	case "$export_file" in
+		/www/aquadx-download/AquaDX-*.sql.gz) ;;
+		*) return 1 ;;
+	esac
+	sleep 300
+	rm -f "$export_file"
+}
+
+restore_database_backup() {
+	backup_raw="$1"
+	mysql --protocol=socket --socket=/var/run/mysqld/mysqld.sock -uroot \
+		-e "DROP DATABASE IF EXISTS main; CREATE DATABASE main CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" \
+		>> "$LOG_FILE" 2>&1 || return 1
+	mysql --protocol=socket --socket=/var/run/mysqld/mysqld.sock -uroot main \
+		< "$backup_raw" >> "$LOG_FILE" 2>&1
+}
+
+finish_import_runtime() {
+	if [ "$app_was_running" = true ]; then
+		start_async >/dev/null 2>&1
+	elif [ "$db_was_running" = false ]; then
+		/etc/init.d/mysqld stop >/dev/null 2>&1
+	fi
+}
+
+import_database_worker() {
+	import_raw="/tmp/aquadx-import-$$.sql"
+	backup_raw="/tmp/aquadx-pre-import-$$.sql"
+	trap 'rm -f "$DB_JOB_PID_FILE" "$DB_UPLOAD_FILE" "$import_raw" "$backup_raw"' EXIT INT TERM
+	if gzip -t "$DB_UPLOAD_FILE" >/dev/null 2>&1; then
+		gzip -dc "$DB_UPLOAD_FILE" > "$import_raw" || {
+			finish_db_job error "The compressed database file is damaged."
+			return 1
+		}
+	else
+		cp "$DB_UPLOAD_FILE" "$import_raw" || {
+			finish_db_job error "Unable to read the uploaded database file."
+			return 1
+		}
+	fi
+	if ! grep -Eq 'CREATE TABLE|INSERT INTO|USE [`]?main' "$import_raw"; then
+		finish_db_job error "Invaild backup file."
+		return 1
+	fi
+	app_was_running=false
+	db_was_running=false
+	pid_alive "$APP_PID_FILE" && app_was_running=true
+	database_ready && db_was_running=true
+	if ! ensure_database_for_transfer; then
+		finish_db_job error "MariaDB could not be started."
+		return 1
+	fi
+	mkdir -p "$DATA_DIR/backups"
+	backup_file="$DATA_DIR/backups/pre-import-$(date '+%Y%m%d-%H%M%S').sql.gz"
+	if ! mysqldump --protocol=socket --socket=/var/run/mysqld/mysqld.sock -uroot \
+		--single-transaction --routines --events --triggers --add-drop-database \
+		--databases main > "$backup_raw" 2>> "$LOG_FILE" || \
+		! gzip -c "$backup_raw" > "$backup_file"; then
+		rm -f "$backup_file"
+		finish_import_runtime
+		finish_db_job error "Unable to create database backup."
+		return 1
+	fi
+	chmod 0600 "$backup_file"
+	stop_pid "$APP_PID_FILE"
+	if ! mysql --protocol=socket --socket=/var/run/mysqld/mysqld.sock -uroot \
+		-e "DROP DATABASE IF EXISTS main; CREATE DATABASE main CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" \
+		>> "$LOG_FILE" 2>&1 || \
+		! mysql --protocol=socket --socket=/var/run/mysqld/mysqld.sock -uroot main \
+		< "$import_raw" >> "$LOG_FILE" 2>&1; then
+		restore_database_backup "$backup_raw"
+		finish_import_runtime
+		finish_db_job error "Database import failed. Backup was restored."
+		return 1
+	fi
+	finish_import_runtime
+	finish_db_job done "$backup_file"
+}
+
+load_config
+case "$1" in
+	start) start_async ;;
+	_start) start_stack ;;
+	stop) stop_stack ;;
+	set-game-ip) set_game_ip "$2" ;;
+	list-clients) list_game_clients ;;
+	server-address) server_address_status ;;
+	apply-settings) shift; apply_settings "$@" ;;
+	apply-settings-v2) shift; apply_settings_v2 "$@" ;;
+	apply-settings-v3) shift; apply_settings_v3 "$@" ;;
+	_restart-settings) restart_app_for_settings ;;
+	export-db) start_db_job export-db ;;
+	import-db) start_db_job import-db ;;
+	db-job-status) db_job_status ;;
+	_export-db) export_database_worker ;;
+	_import-db) import_database_worker ;;
+	_cleanup-export) cleanup_export "$2" ;;
+	status-json) status_json ;;
+	status)
+		pid_alive "$APP_PID_FILE" && exit 0
+		exit 1
+		;;
+	*)
+		echo "Usage: $0 {start|stop|set-game-ip IP|list-clients|server-address|apply-settings AUTO_START [IP REMARK]...|apply-settings-v2 AUTO_START [ENABLED IP REMARK]...|apply-settings-v3 AUTO_START CUSTOM_ADDRESS_ENABLED CUSTOM_ADDRESS [ENABLED IP REMARK]...|export-db|import-db|db-job-status|status|status-json}" >&2
+		exit 1
+		;;
+esac

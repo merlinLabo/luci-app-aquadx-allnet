@@ -1,0 +1,17 @@
+{
+	"luci-app-aquadx": {
+		"description": "Manage AquaDX ALL.Net Server",
+		"read": {
+			"file": {
+				"/usr/libexec/aquadx-ctl": [ "exec" ]
+			},
+			"uci": [ "aquadx", "network" ]
+		},
+		"write": {
+			"file": {
+				"/usr/libexec/aquadx-ctl": [ "exec" ]
+			},
+			"uci": [ "aquadx" ]
+		}
+	}
+}

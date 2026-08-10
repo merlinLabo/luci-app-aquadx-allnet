@@ -1,0 +1,24 @@
+#!/bin/sh /etc/rc.common
+
+START=95
+STOP=10
+
+start() {
+	/usr/libexec/aquadx-service start
+}
+
+stop() {
+	/usr/libexec/aquadx-service stop
+}
+
+restart() {
+	stop
+	start
+}
+
+status() {
+	/usr/libexec/aquadx-service status
+}
+
+EXTRA_COMMANDS="status"
+EXTRA_HELP="status  Show AquaDX service status"

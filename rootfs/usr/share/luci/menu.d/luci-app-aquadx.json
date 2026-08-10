@@ -1,0 +1,13 @@
+{
+	"admin/services/aquadx": {
+		"title": "ALL.Net Server",
+		"order": 65,
+		"action": {
+			"type": "view",
+			"path": "aquadx/overview"
+		},
+		"depends": {
+			"acl": [ "luci-app-aquadx" ]
+		}
+	}
+}

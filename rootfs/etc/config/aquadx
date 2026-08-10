@@ -1,0 +1,8 @@
+config aquadx 'main'
+	option data_dir '/opt/aquadx'
+	option java_xms '256m'
+	option java_xmx '1536m'
+	option frontend_port '8088'
+	option game_client_ip ''
+	option custom_server_address_enabled '0'
+	option custom_server_address ''

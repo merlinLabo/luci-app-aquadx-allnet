@@ -1,0 +1,59 @@
+#!/bin/sh
+
+case "$1" in
+	start)
+		/etc/init.d/aquadx start
+		;;
+	stop)
+		/etc/init.d/aquadx stop
+		;;
+	restart)
+		/etc/init.d/aquadx restart
+		;;
+	enable)
+		/etc/init.d/aquadx enable
+		;;
+	disable)
+		/etc/init.d/aquadx disable
+		;;
+	status|"")
+		/usr/libexec/aquadx-service status-json
+		;;
+	progress)
+		[ ! -f /opt/aquadx/logs/launcher.log ] || tail -n 200 /opt/aquadx/logs/launcher.log
+		;;
+	log)
+		[ ! -f /opt/aquadx/logs/AquaDX.log ] || tail -n 200 /opt/aquadx/logs/AquaDX.log
+		;;
+	log-all)
+		[ ! -f /opt/aquadx/logs/AquaDX.log ] || cat /opt/aquadx/logs/AquaDX.log
+		;;
+	set-game-ip)
+		/usr/libexec/aquadx-service set-game-ip "$2"
+		;;
+	list-clients)
+		/usr/libexec/aquadx-service list-clients
+		;;
+	server-address)
+		/usr/libexec/aquadx-service server-address
+		;;
+	apply-settings)
+		shift
+		/usr/libexec/aquadx-service apply-settings "$@"
+		;;
+	apply-settings-v2)
+		shift
+		/usr/libexec/aquadx-service apply-settings-v2 "$@"
+		;;
+	apply-settings-v3)
+		shift
+		/usr/libexec/aquadx-service apply-settings-v3 "$@"
+		;;
+	export-db|import-db|db-job-status)
+		/usr/libexec/aquadx-service "$1"
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart|enable|disable|status|progress|log|log-all|set-game-ip IP|list-clients|server-address|apply-settings AUTO_START [IP REMARK]...|apply-settings-v2 AUTO_START [ENABLED IP REMARK]...|apply-settings-v3 AUTO_START CUSTOM_ADDRESS_ENABLED CUSTOM_ADDRESS [ENABLED IP REMARK]...|export-db|import-db|db-job-status}" >&2
+		exit 1
+		;;
+esac
