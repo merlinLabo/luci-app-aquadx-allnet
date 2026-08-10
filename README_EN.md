@@ -1,6 +1,6 @@
 # luci-app-aquadx-allnet
 
-English | [简体中文](README.md)
+English | [简体中文](README_CN.md)
 
 A local ALL.Net game server for OpenWrt and provides a Luci management page. Based on [AquaDX](https://github.com/MewoLab/AquaDX). 
 
